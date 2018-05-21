@@ -1,5 +1,5 @@
 from functools import reduce
-from numba import cuda
+from numba import cuda, int32
 import numpy as np
 import math
 
@@ -14,6 +14,55 @@ def read_file(input_name):
                 int_l.append(int(ch))
             input_arr.append(int_l)
     return input_arr
+
+# TPB=8
+# @cuda.jit
+# def fast_matmul(A, B, C):
+#     """
+#     Perform matrix multiplication of C = A * B
+#     Each thread computes one element of the result matrix C
+#     """
+#
+#     # Define an array in the shared memory
+#     # The size and type of the arrays must be known at compile time
+#     sA = cuda.shared.array(shape=(TPB, TPB), dtype=int32)
+#     sB = cuda.shared.array(shape=(TPB, TPB), dtype=int32)
+#
+#     x, y = cuda.grid(2)
+#
+#     tx = cuda.threadIdx.x
+#     ty = cuda.threadIdx.y
+#
+#     if x >= C.shape[0] or y >= C.shape[1]:
+#         # Quit if (x, y) is outside of valid C boundary
+#         return
+#
+#     # Each thread computes one element in the result matrix.
+#     # The dot product is chunked into dot products of TPB-long vectors.
+#     tmp = 0
+#     for i in range(int(math.ceil(A.shape[1] / TPB))):
+#         # Preload data into shared memory
+#         if ty + i*TPB < A.shape[1]:
+#             sA[tx, ty] = A[x, ty + i * TPB]
+#         if tx + i * TPB < B.shape[0]:
+#             sB[tx, ty] = B[tx + i * TPB, y]
+#
+#         # Wait until all threads finish preloading
+#         cuda.syncthreads()
+#
+#         # Computes partial product on the shared memory
+#         for j in range(TPB):
+#             if (j + i*TPB) < A.shape[1]:
+#                 tmp += sA[tx, j] * sB[j, ty]
+#
+#         # Wait until all threads finish computing
+#         cuda.syncthreads()
+#
+#     # for i in range((int(A.shape[1]//TPB))*TPB, A.shape[1]):
+#     #     tmp += A[x, i] * B[i, y]
+#     #     cuda.syncthreads()
+#
+#     C[x, y] = tmp
 
 
 @cuda.jit
@@ -68,6 +117,7 @@ def multiply_pre_basis(small_pre_basis, big_pre_basis, result):
         for k in range(small_pre_basis.shape[1]):
             tmp += small_pre_basis[row, k] * big_pre_basis[k, col]
         result[row, col] = tmp
+
     # for small_vector in small_pre_basis:
     #     one_vector_result = [0] * len(big_pre_basis[0])
     #     for i_small_vector in range(0, len(small_vector)):
@@ -78,14 +128,46 @@ def multiply_pre_basis(small_pre_basis, big_pre_basis, result):
     # return result
 
 
-cudareduced_gcd = cuda.reduce(math.gcd)
-
+# cudareduced_gcd = cuda.reduce(math.gcd)
+# @cuda.reduce
+# def reduced_cuda_GCD(a, b):  # Greatest Common Divisor
+#     while b:
+#         a, b = b, a % b
+#     return a
 
 # @cuda.jit
 # def find_gcds(ar, gcds):
 #     pos = cuda.grid(1)
 #     if pos < gcds.shape[0]:
-#         gcds[pos] = cuda.reduce(math.gcd, ar[pos])
+#         cudareduced_gcd(ar[pos], res=gcds)
+        # gcds[pos] = cuda.reduce(math.gcd, ar[pos])
+
+
+@cuda.jit
+def cuda_gcd(ar, work_copy):
+    arlen = work_copy.shape[1]
+    # ar_local_mem = cuda.shared.array(ar.shape[0], dtype=int)
+    row, col = cuda.grid(2)
+    # if pos < arlen:
+    #     ar_local_mem[pos] = ar[pos]
+    if row < ar.shape[0] and col < ar.shape[1]:
+        work_copy[row, col] = ar[row, col]
+        cuda.syncthreads()
+        while arlen > 1:
+            if col < (arlen//2):
+                while work_copy[row, col * 2 + 1]:
+                    work_copy[row, col * 2], work_copy[row, col * 2 + 1] = work_copy[row, col * 2 + 1], work_copy[row, col * 2] % work_copy[row, col * 2 + 1]
+                work_copy[row, col] = work_copy[row, col * 2]
+                #ar[pos] = euclidius(ar[pos*2], ar[pos*2+1])
+            if math.ceil(arlen/2) > arlen//2:
+                work_copy[row, int(arlen // 2)] = work_copy[row, int(arlen - 1)]
+            arlen = math.ceil(arlen/2)
+            cuda.syncthreads()
+        # d = work_copy[row][0]
+        # if d != 1 and d != 0:
+        #     ar[row, col] = ar[row, col] // d
+
+
 def find_gcds(ar):
     gcds = np.empty(ar.shape[0], dtype=int)
     for i in range(ar.shape[0]):
@@ -97,7 +179,7 @@ def find_gcds(ar):
 def simplify(ar, gcds):
     row, col = cuda.grid(2)
     if row < ar.shape[0] and col < ar.shape[1]:
-        d = gcds[row]
+        d = gcds[row][0]
         if d != 1 and d != 0:
             ar[row, col] = ar[row, col] // d
 
@@ -106,22 +188,22 @@ def solv(input_arr):
     # pre_basis_main = create_pre_basis(input_arr[0])
     pre_basis_main = cuda.device_array(((len(input_arr[0])-1), len(input_arr[0])), dtype=int)
 
-    threadsperblock = 256
+    threadsperblock = 512
     blockspergrid = math.ceil((len(input_arr[0])-1)/threadsperblock)
 
     create_pre_basis[blockspergrid, threadsperblock](np.array(input_arr[0], dtype=int), pre_basis_main)
     for Li in range(1, len(input_arr)):
         subresult_global_mem = cuda.device_array(pre_basis_main.shape[0], dtype=int)
-        subinput1 = np.array(input_arr[Li], dtype=int)
+        next_equation = np.array(input_arr[Li], dtype=int)
         threadsperblock = 256
         blockspergrid = math.ceil(pre_basis_main.shape[0]/threadsperblock)
-        cuda_substitute[blockspergrid, threadsperblock](subinput1, pre_basis_main, subresult_global_mem)
+        cuda_substitute[blockspergrid, threadsperblock](next_equation, pre_basis_main, subresult_global_mem)
         #debug_subresult_global_mem = subresult_global_mem.copy_to_host()
         # Y = subresult_global_mem.copy_to_host().tolist()
 
         #pre_basis_Y = create_pre_basis(Y)
         pre_basis_Y = cuda.device_array((subresult_global_mem.shape[0]-1, subresult_global_mem.shape[0]), dtype=int)
-        threadsperblock = 256
+        threadsperblock = 512
         blockspergrid = math.ceil((subresult_global_mem.shape[0] - 1) / threadsperblock)
         create_pre_basis[blockspergrid, threadsperblock](subresult_global_mem, pre_basis_Y)
 
@@ -129,31 +211,32 @@ def solv(input_arr):
         #mult_pre_basis_Y = np.array(pre_basis_Y, dtype=int)
         mult_result_global_mem = cuda.device_array((pre_basis_Y.shape[0], pre_basis_main.shape[1]), dtype=int)
 
-        threadsperblock = (16, 16)
+        threadsperblock = (8, 8)
         blockspergrid_x = int(math.ceil(pre_basis_Y.shape[0] / threadsperblock[0]))
         blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] / threadsperblock[1]))
         blockspergrid = (blockspergrid_x, blockspergrid_y)
 
         multiply_pre_basis[blockspergrid, threadsperblock](pre_basis_Y, pre_basis_main, mult_result_global_mem)
+        # fast_matmul[blockspergrid, threadsperblock](pre_basis_Y, pre_basis_main, mult_result_global_mem)
+
 
         pre_basis_main = mult_result_global_mem
 
-        #gcds_global_mem = cuda.device_array(pre_basis_main.shape[0], dtype=int)
-
-        # threadsperblock = 256
-        # blockspergrid = math.ceil(pre_basis_main.shape[0]/threadsperblock)
-        # find_gcds[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
-        gcds = find_gcds(pre_basis_main.copy_to_host())
-        gcds_global_mem = cuda.to_device(gcds)
+        gcds_global_mem = cuda.device_array(pre_basis_main.shape, dtype=int)
 
         threadsperblock = (16, 16)
         blockspergrid_x = int(math.ceil(pre_basis_main.shape[0] / threadsperblock[0]))
-        blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] /threadsperblock[1]))
+        blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] / threadsperblock[1]))
         blockspergrid = (blockspergrid_x, blockspergrid_y)
-        simplify[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
+        cuda_gcd[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
+        # gcds = find_gcds(pre_basis_main.copy_to_host())
+        # gcds_global_mem = cuda.to_device(gcds)
 
-        #pre_basis_main = simplify(pre_basis_main)
-        #a = pre_basis_main.copy_to_host()
+        threadsperblock = (16, 16)
+        blockspergrid_x = int(math.ceil(pre_basis_main.shape[0] / threadsperblock[0]))
+        blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] / threadsperblock[1]))
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+        #simplify[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
     return pre_basis_main.copy_to_host()
 
 
@@ -164,7 +247,7 @@ def timetest():
     solv(read_file(file))
 
 if __name__ == "__main__":
-    file = 'multiplied100x300.txt'
+    file = 'input40x61(10x30).txt'
     print(solv(read_file(file)))
     import timeit
     print(timeit.timeit("timetest()", setup="from __main__ import timetest", number=100))
