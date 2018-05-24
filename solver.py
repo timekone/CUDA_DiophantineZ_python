@@ -236,7 +236,7 @@ def solv(input_arr):
         blockspergrid_x = int(math.ceil(pre_basis_main.shape[0] / threadsperblock[0]))
         blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] / threadsperblock[1]))
         blockspergrid = (blockspergrid_x, blockspergrid_y)
-        #simplify[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
+        simplify[blockspergrid, threadsperblock](pre_basis_main, gcds_global_mem)
     return pre_basis_main.copy_to_host()
 
 
