@@ -84,18 +84,8 @@ def create_pre_basis(equation, pre_basis):
             pre_basis[pos][pos] = equation[i_not_zero]
 
 
-def substitute(equation, pre_basis):
-    result = []
-    for vector in pre_basis:
-        one_vector_result = 0
-        for c in range(0, len(equation)):
-            one_vector_result += vector[c]*equation[c]
-        result.append(one_vector_result)
-    return result
-
-
 @cuda.jit
-def cuda_substitute(equation, pre_basis, result):
+def substitute(equation, pre_basis, result):
     pos = cuda.grid(1)
     if pos < result.shape[0]:
         one_vector_result = 0
@@ -193,34 +183,34 @@ def solv(input_arr):
 
     create_pre_basis[blockspergrid, threadsperblock](np.array(input_arr[0], dtype=int), pre_basis_main)
     for Li in range(1, len(input_arr)):
-        subresult_global_mem = cuda.device_array(pre_basis_main.shape[0], dtype=int)
+        subst_result = cuda.device_array(pre_basis_main.shape[0], dtype=int)
         next_equation = np.array(input_arr[Li], dtype=int)
         threadsperblock = 256
         blockspergrid = math.ceil(pre_basis_main.shape[0]/threadsperblock)
-        cuda_substitute[blockspergrid, threadsperblock](next_equation, pre_basis_main, subresult_global_mem)
-        #debug_subresult_global_mem = subresult_global_mem.copy_to_host()
-        # Y = subresult_global_mem.copy_to_host().tolist()
+        substitute[blockspergrid, threadsperblock](next_equation, pre_basis_main, subst_result)
+        #debug_subresult_global_mem = subst_result.copy_to_host()
+        # Y = subst_result.copy_to_host().tolist()
 
-        #pre_basis_Y = create_pre_basis(Y)
-        pre_basis_Y = cuda.device_array((subresult_global_mem.shape[0]-1, subresult_global_mem.shape[0]), dtype=int)
+        #small_pre_basis = create_pre_basis(Y)
+        small_pre_basis = cuda.device_array((subst_result.shape[0]-1, subst_result.shape[0]), dtype=int)
         threadsperblock = 512
-        blockspergrid = math.ceil((subresult_global_mem.shape[0] - 1) / threadsperblock)
-        create_pre_basis[blockspergrid, threadsperblock](subresult_global_mem, pre_basis_Y)
+        blockspergrid = math.ceil((subst_result.shape[0] - 1) / threadsperblock)
+        create_pre_basis[blockspergrid, threadsperblock](subst_result, small_pre_basis)
 
-        #debug_pre_basis_Y = pre_basis_Y.copy_to_host()
-        #mult_pre_basis_Y = np.array(pre_basis_Y, dtype=int)
-        mult_result_global_mem = cuda.device_array((pre_basis_Y.shape[0], pre_basis_main.shape[1]), dtype=int)
+        #debug_pre_basis_Y = small_pre_basis.copy_to_host()
+        #mult_pre_basis_Y = np.array(small_pre_basis, dtype=int)
+        mult_result = cuda.device_array((small_pre_basis.shape[0], pre_basis_main.shape[1]), dtype=int)
 
         threadsperblock = (8, 8)
-        blockspergrid_x = int(math.ceil(pre_basis_Y.shape[0] / threadsperblock[0]))
+        blockspergrid_x = int(math.ceil(small_pre_basis.shape[0] / threadsperblock[0]))
         blockspergrid_y = int(math.ceil(pre_basis_main.shape[1] / threadsperblock[1]))
         blockspergrid = (blockspergrid_x, blockspergrid_y)
 
-        multiply_pre_basis[blockspergrid, threadsperblock](pre_basis_Y, pre_basis_main, mult_result_global_mem)
-        # fast_matmul[blockspergrid, threadsperblock](pre_basis_Y, pre_basis_main, mult_result_global_mem)
+        multiply_pre_basis[blockspergrid, threadsperblock](small_pre_basis, pre_basis_main, mult_result)
+        # fast_matmul[blockspergrid, threadsperblock](small_pre_basis, pre_basis_main, mult_result)
 
 
-        pre_basis_main = mult_result_global_mem
+        pre_basis_main = mult_result
 
         gcds_global_mem = cuda.device_array(pre_basis_main.shape, dtype=int)
 
@@ -243,8 +233,6 @@ def solv(input_arr):
 def control_main(input_name):
     return solv(read_file(input_name))
 
-def timetest():
-    solv(read_file(file))
 
 if __name__ == "__main__":
     file = 'input40x61(10x30).txt'
